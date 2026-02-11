@@ -10,7 +10,7 @@ const generateToken = (id) => {
 
 //  Register user
 exports.signup = async (req, res) => {
-  const { name, email, phone, password, confirmPassword } = req.body;
+  const { name, email, password, confirmPassword } = req.body;
 
   if (password !== confirmPassword) {
     return res.status(400).json({ message: "Passwords do not match" });
@@ -22,7 +22,7 @@ exports.signup = async (req, res) => {
       return res.status(400).json({ message: "User already exists" });
     }
 
-    const user = await User.create({ name, email, phone, password });
+    const user = await User.create({ name, email, password });
 
     const token = generateToken(user._id);
 
