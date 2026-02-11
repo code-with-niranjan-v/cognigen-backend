@@ -33,7 +33,7 @@ router.post("/:id/topics", addTopic);
 router.patch("/:id/topics/:topicId", updateTopic);
 router.delete("/:id/topics/:topicId", deleteTopic);
 
-// Submodules CRUD (nested under topic)
+// Submodules CRUD
 router.post("/:id/topics/:topicId/submodules", addSubmodule);
 router.patch("/:id/topics/:topicId/submodules/:subId", updateSubmodule);
 router.delete("/:id/topics/:topicId/submodules/:subId", deleteSubmodule);

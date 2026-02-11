@@ -30,9 +30,6 @@ async function generateLearningPath(payload) {
   }
 }
 
-/**
- * Generate content for one topic (all its submodules)
- */
 async function generateTopicContent(payload) {
   try {
     const response = await axios.post(
@@ -45,7 +42,7 @@ async function generateTopicContent(payload) {
 
     return response.data;
   } catch (error) {
-    const errorTime = new Date().toISOString(); // <-- TIME OF ERROR
+    const errorTime = new Date().toISOString();
 
     console.error(
       `[${errorTime}] Topic content generation failed:`,

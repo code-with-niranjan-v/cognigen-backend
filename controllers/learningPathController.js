@@ -1,13 +1,10 @@
-// controllers/learningPathController.js
+// cognigen-backend/controllers/learningPathController.js
 const LearningPath = require("../models/LearningPath");
 const {
   generateLearningPath,
   generateTopicContent,
 } = require("../services/aiService");
 
-/**
- * Generate new learning path
- */
 exports.generateLearningPath = async (req, res) => {
   try {
     const userId = req.user._id;
@@ -21,9 +18,6 @@ exports.generateLearningPath = async (req, res) => {
       custom_topics = [],
     } = req.body;
 
-    // -----------------------------
-    // LOG INPUT PAYLOAD
-    // -----------------------------
     console.log(
       "\n[DEBUG] Incoming LP request:",
       JSON.stringify(req.body, null, 2),
@@ -50,16 +44,12 @@ exports.generateLearningPath = async (req, res) => {
     } catch (err) {
       console.error("[AI ERROR] FastAPI failed:", err.message);
 
-      // Provide fallback minimal structure
       aiResult = {
         title: `${course_name} Learning Path (Partial)`,
         topics: [],
       };
     }
 
-    // -----------------------------
-    // MAP FastAPI RESULT → MongoDB
-    // -----------------------------
     const learningPath = new LearningPath({
       user: userId,
       title: aiResult.title || `${course_name} Learning Path`,
@@ -101,9 +91,6 @@ exports.generateLearningPath = async (req, res) => {
   }
 };
 
-/**
- * Get all learning paths for current user
- */
 exports.getUserLearningPaths = async (req, res) => {
   try {
     const paths = await LearningPath.find({ user: req.user._id })
@@ -118,9 +105,6 @@ exports.getUserLearningPaths = async (req, res) => {
   }
 };
 
-/**
- * Get single learning path by ID
- */
 exports.getLearningPathById = async (req, res) => {
   try {
     const lp = await LearningPath.findOne({
@@ -137,9 +121,6 @@ exports.getLearningPathById = async (req, res) => {
   }
 };
 
-/**
- * Generate topic content using FastAPI
- */
 exports.generateTopicContent = async (req, res) => {
   try {
     const { pathId, topicId } = req.params;
@@ -159,9 +140,6 @@ exports.generateTopicContent = async (req, res) => {
       return res.status(404).json({ message: "Topic not found" });
     }
 
-    // -----------------------------
-    // Prepare payload for FastAPI
-    // -----------------------------
     const aiPayload = {
       topic_id: topicId,
       topic_name: topic.name,
@@ -183,17 +161,11 @@ exports.generateTopicContent = async (req, res) => {
       JSON.stringify(aiResult, null, 2),
     );
 
-    // -----------------------------
-    // FASTAPI RETURNS:
-    // { content: [ { submodule_id, content } ] }
-    // -----------------------------
-
     const generatedMap = {};
     aiResult.content.forEach((c) => {
       generatedMap[c.submodule_id] = c;
     });
 
-    // Apply generated content to submodules
     topic.submodules = topic.submodules.map((sub) => {
       const g = generatedMap[sub.id];
       if (g) {
@@ -217,9 +189,6 @@ exports.generateTopicContent = async (req, res) => {
   }
 };
 
-/**
- * Mark a submodule completed + update progress
- */
 exports.markSubmoduleComplete = async (req, res) => {
   try {
     const { pathId, topicId, submoduleId } = req.params;
@@ -241,14 +210,12 @@ exports.markSubmoduleComplete = async (req, res) => {
       sub.completed = true;
       topic.completedSubmodules += 1;
 
-      // Topic progress %
       const totalSubs = topic.submodules.length;
       topic.progress =
         totalSubs > 0
           ? Math.round((topic.completedSubmodules / totalSubs) * 100)
           : 0;
 
-      // Path progress %
       let totalSubsAll = 0;
       let completedAll = 0;
 
@@ -273,7 +240,6 @@ exports.markSubmoduleComplete = async (req, res) => {
   }
 };
 
-// Update path title/description
 exports.updateLearningPath = async (req, res) => {
   try {
     const { title, description } = req.body;
@@ -289,15 +255,13 @@ exports.updateLearningPath = async (req, res) => {
   }
 };
 
-// ─── TOPIC CRUD ───
-
 exports.addTopic = async (req, res) => {
   try {
     const {
       name,
       difficulty = "medium",
       estimatedTimeMinutes = 60,
-      submodules = [], // ← accept submodules array
+      submodules = [],
     } = req.body;
 
     const path = await LearningPath.findOne({
@@ -306,7 +270,6 @@ exports.addTopic = async (req, res) => {
     });
     if (!path) return res.status(404).json({ message: "Path not found" });
 
-    // If no submodules provided → create default one
     let finalSubmodules = submodules;
     if (finalSubmodules.length === 0) {
       finalSubmodules = [
@@ -342,12 +305,7 @@ exports.addTopic = async (req, res) => {
 
 exports.updateTopic = async (req, res) => {
   try {
-    const {
-      name,
-      difficulty,
-      estimatedTimeMinutes,
-      submodules, // ← accept submodules update
-    } = req.body;
+    const { name, difficulty, estimatedTimeMinutes, submodules } = req.body;
 
     const path = await LearningPath.findOne({
       _id: req.params.id,
@@ -362,15 +320,12 @@ exports.updateTopic = async (req, res) => {
     if (difficulty) topic.difficulty = difficulty;
     if (estimatedTimeMinutes) topic.estimatedTimeMinutes = estimatedTimeMinutes;
 
-    // Update submodules if provided
     if (submodules && Array.isArray(submodules)) {
-      // Optional: validate each has id, title, etc.
       topic.submodules = submodules.map((sub) => ({
         ...sub,
         id: sub.id || require("uuid").v4(), // ensure ID exists
       }));
 
-      // If after update there are no submodules → add default
       if (topic.submodules.length === 0) {
         topic.submodules = [
           {
@@ -408,8 +363,6 @@ exports.deleteTopic = async (req, res) => {
     res.status(500).json({ message: "Failed to delete topic" });
   }
 };
-
-// ─── SUBMODULE CRUD ─── (similar pattern)
 
 exports.addSubmodule = async (req, res) => {
   try {
@@ -490,11 +443,9 @@ exports.deleteSubmodule = async (req, res) => {
   }
 };
 
-// ─── REORDER TOPICS ───
-
 exports.reorderTopics = async (req, res) => {
   try {
-    const { orderedTopicIds } = req.body; // array of topic.id strings in new order
+    const { orderedTopicIds } = req.body;
 
     const path = await LearningPath.findOne({
       _id: req.params.id,

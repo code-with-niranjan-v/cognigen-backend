@@ -55,7 +55,7 @@ const LearningPathSchema = new mongoose.Schema({
   },
   customTopics: [String],
   topics: [TopicSchema],
-  overallProgress: { type: Number, default: 0 }, // 0–100
+  overallProgress: { type: Number, default: 0 },
   status: {
     type: String,
     enum: ["draft", "active", "completed"],
