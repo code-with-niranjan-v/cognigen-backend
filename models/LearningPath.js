@@ -1,18 +1,56 @@
-// models/LearningPath.js
+// cognigen-ba
 const mongoose = require("mongoose");
+const { v4: uuidv4 } = require("uuid");
+
+const CellSchema = new mongoose.Schema(
+  {
+    id: {
+      type: String,
+      required: true,
+      default: uuidv4,
+    },
+    type: {
+      type: String,
+      enum: ["markdown", "code", "resource", "image", "diagram", "separator"],
+      required: true,
+    },
+
+    content: {
+      type: mongoose.Schema.Types.Mixed,
+      required: true,
+    },
+
+    title: String,
+    language: String,
+    meta: mongoose.Schema.Types.Mixed,
+  },
+  { _id: false },
+);
 
 const SubmoduleSchema = new mongoose.Schema({
   id: { type: String, required: true },
   title: { type: String, required: true },
-  summary: { type: String },
-  content: {
-    explanation: String,
-    codeExamples: [String],
-    realWorldExamples: [String],
-    stepByStepGuide: [String],
-    miniQuiz: [{ question: String, options: [String], answer: String }],
-    projectSuggestion: String,
+  summary: String,
+
+  cells: [CellSchema],
+
+  miniQuiz: [
+    {
+      question: String,
+      options: [String],
+      answer: String,
+      difficulty: {
+        type: String,
+        enum: ["easy", "medium", "hard"],
+      },
+    },
+  ],
+
+  contentVersion: {
+    type: Number,
+    default: 2,
   },
+
   completed: { type: Boolean, default: false },
   generatedAt: { type: Date },
 });

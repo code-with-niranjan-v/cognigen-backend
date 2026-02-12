@@ -57,7 +57,24 @@ async function generateTopicContent(payload) {
   }
 }
 
+async function generateMiniQuiz(payload) {
+  try {
+    const response = await axios.post(
+      `${AI_SERVICE_URL}/api/generate-mini-quiz`,
+      payload,
+      { timeout: 600000 },
+    );
+    return response.data;
+  } catch (error) {
+    console.error("[AI Quiz Error]", error.message);
+    throw new Error(
+      error.response?.data?.detail || "Failed to generate mini quiz",
+    );
+  }
+}
+
 module.exports = {
   generateLearningPath,
   generateTopicContent,
+  generateMiniQuiz,
 };

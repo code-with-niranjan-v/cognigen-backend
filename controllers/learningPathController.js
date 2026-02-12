@@ -1,10 +1,52 @@
 // cognigen-backend/controllers/learningPathController.js
 const LearningPath = require("../models/LearningPath");
 const {
-  generateLearningPath,
-  generateTopicContent,
+  generateLearningPath: callAILearningPath,
+  generateTopicContent: callAITopicContent,
+  generateMiniQuiz: callAIMiniQuiz,
 } = require("../services/aiService");
+const { v4: uuidv4 } = require("uuid");
 
+// Helper: Recalculate topic & overall path progress
+const recalculateProgress = async (path) => {
+  let totalSubmodules = 0;
+  let completedSubmodules = 0;
+
+  path.topics.forEach((topic) => {
+    topic.completedSubmodules = 0;
+
+    topic.submodules.forEach((sub) => {
+      totalSubmodules++;
+      if (sub.completed) {
+        completedSubmodules++;
+        topic.completedSubmodules++;
+      }
+    });
+
+    // Topic-level progress (0-100%)
+    topic.progress =
+      topic.submodules.length > 0
+        ? Math.round(
+            (topic.completedSubmodules / topic.submodules.length) * 100,
+          )
+        : 0;
+  });
+
+  // Overall path progress
+  path.overallProgress =
+    totalSubmodules > 0
+      ? Math.round((completedSubmodules / totalSubmodules) * 100)
+      : 0;
+
+  if (path.overallProgress === 100) {
+    path.status = "completed";
+  }
+
+  path.markModified("topics"); // Required for nested array updates
+  await path.save();
+};
+
+// 1. Generate full learning path (AI → DB)
 exports.generateLearningPath = async (req, res) => {
   try {
     const userId = req.user._id;
@@ -34,16 +76,14 @@ exports.generateLearningPath = async (req, res) => {
     };
 
     let aiResult;
-
     try {
-      aiResult = await generateLearningPath(aiPayload);
+      aiResult = await callAILearningPath(aiPayload);
       console.log(
         "[DEBUG] FastAPI LP Response:",
         JSON.stringify(aiResult, null, 2),
       );
     } catch (err) {
       console.error("[AI ERROR] FastAPI failed:", err.message);
-
       aiResult = {
         title: `${course_name} Learning Path (Partial)`,
         topics: [],
@@ -57,28 +97,29 @@ exports.generateLearningPath = async (req, res) => {
       experienceLevel: experience_level,
       goal,
       preferredLearningStyle: preferred_learning_style,
-
       timeAvailability: {
         perDayHours: time_availability?.per_day_hours || 1,
       },
-
       customTopics: custom_topics,
-
       topics:
         aiResult.topics?.map((t) => ({
           id: t.id,
           name: t.name,
-          difficulty: t.difficulty,
+          difficulty: t.difficulty || "easy",
           estimatedTimeMinutes: (t.estimated_time_hours || 1) * 60,
           submodules: t.submodules.map((s) => ({
             id: s.id,
             title: s.title,
-            summary: s.summary,
-            content: {},
+            summary: s.summary || "",
+            cells: [],
+            miniQuiz: [],
+            contentVersion: 2,
             completed: false,
+            generatedAt: null,
           })),
+          completedSubmodules: 0,
+          contentGenerated: false,
         })) || [],
-
       overallProgress: 0,
       status: aiResult.topics?.length > 0 ? "active" : "draft",
     });
@@ -91,6 +132,7 @@ exports.generateLearningPath = async (req, res) => {
   }
 };
 
+// 2. Get all user's learning paths
 exports.getUserLearningPaths = async (req, res) => {
   try {
     const paths = await LearningPath.find({ user: req.user._id })
@@ -98,13 +140,13 @@ exports.getUserLearningPaths = async (req, res) => {
       .select(
         "title courseName experienceLevel overallProgress status updatedAt topics",
       );
-
     return res.json(paths);
   } catch (error) {
     return res.status(500).json({ message: "Failed to fetch learning paths" });
   }
 };
 
+// 3. Get single learning path by ID
 exports.getLearningPathById = async (req, res) => {
   try {
     const lp = await LearningPath.findOne({
@@ -121,21 +163,21 @@ exports.getLearningPathById = async (req, res) => {
   }
 };
 
+// 4. Generate content for a topic (cells)
 exports.generateTopicContent = async (req, res) => {
-  try {
-    const { pathId, topicId } = req.params;
-    const { submodules } = req.body;
+  const { pathId, topicId } = req.params;
 
-    const learningPath = await LearningPath.findOne({
+  try {
+    const path = await LearningPath.findOne({
       _id: pathId,
       user: req.user._id,
     });
 
-    if (!learningPath) {
+    if (!path) {
       return res.status(404).json({ message: "Learning path not found" });
     }
 
-    const topic = learningPath.topics.find((t) => t.id === topicId);
+    const topic = path.topics.find((t) => t.id === topicId);
     if (!topic) {
       return res.status(404).json({ message: "Topic not found" });
     }
@@ -143,56 +185,118 @@ exports.generateTopicContent = async (req, res) => {
     const aiPayload = {
       topic_id: topicId,
       topic_name: topic.name,
-      course_name: learningPath.courseName,
-      experience_level: learningPath.experienceLevel,
-      submodules:
-        submodules ||
-        topic.submodules.map((sm) => ({
-          id: sm.id,
-          title: sm.title,
-          summary: sm.summary || "",
-        })),
+      course_name: path.courseName,
+      experience_level: path.experienceLevel,
+      submodules: topic.submodules.map((sub) => ({
+        id: sub.id,
+        title: sub.title,
+        summary: sub.summary || "",
+      })),
     };
 
-    const aiResult = await generateTopicContent(aiPayload);
+    const aiResponse = await callAITopicContent(aiPayload);
 
-    console.log(
-      "[DEBUG] Topic Content Response:",
-      JSON.stringify(aiResult, null, 2),
-    );
+    if (!aiResponse.content || !Array.isArray(aiResponse.content)) {
+      throw new Error("Invalid AI response format");
+    }
 
-    const generatedMap = {};
-    aiResult.content.forEach((c) => {
-      generatedMap[c.submodule_id] = c;
-    });
-
+    // Map AI cells to matching submodules
     topic.submodules = topic.submodules.map((sub) => {
-      const g = generatedMap[sub.id];
-      if (g) {
-        return {
-          ...sub,
-          content: g.content,
-          generatedAt: new Date(),
-        };
+      const aiSub = aiResponse.content.find((c) => c.id === sub.id);
+
+      if (aiSub) {
+        sub.cells = aiSub.cells || [];
+        sub.miniQuiz = aiSub.miniQuiz || [];
+        sub.contentVersion = aiSub.contentVersion || 2;
+        sub.generatedAt = aiSub.generatedAt
+          ? new Date(aiSub.generatedAt)
+          : new Date();
       }
+
       return sub;
     });
 
     topic.contentGenerated = true;
 
-    await learningPath.save();
+    await recalculateProgress(path);
 
-    return res.json({ success: true, updatedTopic: topic });
+    res.json({
+      success: true,
+      topic,
+      message: "Content generated and saved successfully",
+    });
   } catch (error) {
     console.error("[ERROR] generateTopicContent:", error);
-    return res.status(500).json({ message: "Content generation failed" });
+    res.status(500).json({
+      message: error.message || "Content generation failed",
+    });
   }
 };
 
-exports.markSubmoduleComplete = async (req, res) => {
-  try {
-    const { pathId, topicId, submoduleId } = req.params;
+// 5. Generate mini quiz for a submodule
+exports.generateMiniQuiz = async (req, res) => {
+  const { pathId, topicId, submoduleId } = req.params;
 
+  try {
+    const path = await LearningPath.findOne({
+      _id: pathId,
+      user: req.user._id,
+    });
+
+    if (!path)
+      return res.status(404).json({ message: "Learning path not found" });
+
+    const topic = path.topics.find((t) => t.id === topicId);
+    if (!topic) return res.status(404).json({ message: "Topic not found" });
+
+    const sub = topic.submodules.find((s) => s.id === submoduleId);
+    if (!sub) return res.status(404).json({ message: "Submodule not found" });
+
+    const optimizedCells =
+      sub.cells
+        ?.filter((c) => c.type === "markdown" || c.type === "code")
+        ?.slice(0, 8)
+        ?.map((c) => ({
+          type: c.type,
+          content: c.content?.slice(0, 2000),
+        })) || [];
+
+    const aiPayload = {
+      submodule_id: submoduleId,
+      submodule_title: sub.title,
+      cells: optimizedCells, // ✅ REQUIRED by your FastAPI graph
+    };
+
+    const aiQuizResponse = await callAIMiniQuiz(aiPayload);
+
+    if (!aiQuizResponse?.quiz || !Array.isArray(aiQuizResponse.quiz)) {
+      throw new Error("Invalid quiz response from AI");
+    }
+
+    sub.miniQuiz = aiQuizResponse.quiz;
+    sub.generatedAt = new Date();
+
+    await path.save();
+
+    res.json({
+      success: true,
+      miniQuiz: sub.miniQuiz,
+      message: "Mini quiz generated and saved",
+    });
+  } catch (error) {
+    console.error("Generate quiz error:", error);
+
+    res.status(500).json({
+      message: "Quiz generation failed. Please try again.",
+    });
+  }
+};
+
+// 6. Mark submodule as complete
+exports.markSubmoduleComplete = async (req, res) => {
+  const { pathId, topicId, submoduleId } = req.params;
+
+  try {
     const path = await LearningPath.findOne({
       _id: pathId,
       user: req.user._id,
@@ -240,6 +344,7 @@ exports.markSubmoduleComplete = async (req, res) => {
   }
 };
 
+// 7. Update learning path (title, etc.)
 exports.updateLearningPath = async (req, res) => {
   try {
     const { title, description } = req.body;
@@ -255,6 +360,7 @@ exports.updateLearningPath = async (req, res) => {
   }
 };
 
+// 8. Add new topic
 exports.addTopic = async (req, res) => {
   try {
     const {
@@ -274,17 +380,20 @@ exports.addTopic = async (req, res) => {
     if (finalSubmodules.length === 0) {
       finalSubmodules = [
         {
-          id: require("uuid").v4(),
+          id: uuidv4(),
           title: name.trim(),
           summary: `Default submodule for "${name.trim()}"`,
-          content: {},
+          cells: [],
+          miniQuiz: [],
+          contentVersion: 2,
           completed: false,
+          generatedAt: null,
         },
       ];
     }
 
     const newTopic = {
-      id: require("uuid").v4(),
+      id: uuidv4(),
       name,
       difficulty,
       estimatedTimeMinutes,
@@ -303,6 +412,7 @@ exports.addTopic = async (req, res) => {
   }
 };
 
+// 9. Update existing topic
 exports.updateTopic = async (req, res) => {
   try {
     const { name, difficulty, estimatedTimeMinutes, submodules } = req.body;
@@ -323,17 +433,23 @@ exports.updateTopic = async (req, res) => {
     if (submodules && Array.isArray(submodules)) {
       topic.submodules = submodules.map((sub) => ({
         ...sub,
-        id: sub.id || require("uuid").v4(), // ensure ID exists
+        id: sub.id || uuidv4(),
+        cells: sub.cells || [],
+        miniQuiz: sub.miniQuiz || [],
+        contentVersion: sub.contentVersion || 2,
       }));
 
       if (topic.submodules.length === 0) {
         topic.submodules = [
           {
-            id: require("uuid").v4(),
+            id: uuidv4(),
             title: topic.name,
             summary: `Default submodule for "${topic.name}"`,
-            content: {},
+            cells: [],
+            miniQuiz: [],
+            contentVersion: 2,
             completed: false,
+            generatedAt: null,
           },
         ];
       }
@@ -347,6 +463,7 @@ exports.updateTopic = async (req, res) => {
   }
 };
 
+// 10. Delete topic
 exports.deleteTopic = async (req, res) => {
   try {
     const path = await LearningPath.findOne({
@@ -356,14 +473,14 @@ exports.deleteTopic = async (req, res) => {
     if (!path) return res.status(404).json({ message: "Path not found" });
 
     path.topics = path.topics.filter((t) => t.id !== req.params.topicId);
-    await path.save();
-
+    await recalculateProgress(path);
     res.json({ message: "Topic deleted" });
   } catch (err) {
     res.status(500).json({ message: "Failed to delete topic" });
   }
 };
 
+// 11. Add submodule
 exports.addSubmodule = async (req, res) => {
   try {
     const { title, summary = "" } = req.body;
@@ -378,11 +495,14 @@ exports.addSubmodule = async (req, res) => {
     if (!topic) return res.status(404).json({ message: "Topic not found" });
 
     const newSub = {
-      id: require("uuid").v4(),
+      id: uuidv4(),
       title,
       summary,
-      content: {},
+      cells: [],
+      miniQuiz: [],
+      contentVersion: 2,
       completed: false,
+      generatedAt: null,
     };
 
     topic.submodules.push(newSub);
@@ -394,6 +514,7 @@ exports.addSubmodule = async (req, res) => {
   }
 };
 
+// 12. Update submodule
 exports.updateSubmodule = async (req, res) => {
   try {
     const { title, summary } = req.body;
@@ -420,6 +541,7 @@ exports.updateSubmodule = async (req, res) => {
   }
 };
 
+// 13. Delete submodule
 exports.deleteSubmodule = async (req, res) => {
   try {
     const path = await LearningPath.findOne({
@@ -435,14 +557,14 @@ exports.deleteSubmodule = async (req, res) => {
       (s) => s.id !== req.params.subId,
     );
 
-    await path.save();
-
+    await recalculateProgress(path);
     res.json({ message: "Submodule deleted" });
   } catch (err) {
     res.status(500).json({ message: "Failed to delete submodule" });
   }
 };
 
+// 14. Reorder topics
 exports.reorderTopics = async (req, res) => {
   try {
     const { orderedTopicIds } = req.body;
@@ -470,8 +592,7 @@ exports.reorderTopics = async (req, res) => {
   }
 };
 
-// ─── REORDER SUBMODULES IN A TOPIC ───
-
+// 15. Reorder submodules in a topic
 exports.reorderSubmodules = async (req, res) => {
   try {
     const pathId = req.params.id;
@@ -505,6 +626,7 @@ exports.reorderSubmodules = async (req, res) => {
   }
 };
 
+// 16. Delete entire learning path
 exports.deleteLearningPath = async (req, res) => {
   try {
     const path = await LearningPath.findOneAndDelete({
@@ -525,5 +647,87 @@ exports.deleteLearningPath = async (req, res) => {
   } catch (error) {
     console.error("Delete error:", error);
     res.status(500).json({ message: "Failed to delete learning path" });
+  }
+};
+
+exports.addCell = async (req, res) => {
+  const { pathId, topicId, submoduleId } = req.params;
+  const { type = "markdown", content = "" } = req.body;
+
+  try {
+    const path = await LearningPath.findOne({
+      _id: pathId,
+      user: req.user._id,
+    });
+
+    if (!path) return res.status(404).json({ message: "Path not found" });
+
+    const topic = path.topics.find((t) => t.id === topicId);
+    const sub = topic?.submodules.find((s) => s.id === submoduleId);
+
+    if (!sub) return res.status(404).json({ message: "Submodule not found" });
+
+    const newCell = {
+      type,
+      content,
+    };
+
+    sub.cells.push(newCell);
+
+    await path.save();
+
+    res.status(201).json(newCell);
+  } catch (err) {
+    res.status(500).json({ message: "Failed to add cell" });
+  }
+};
+
+exports.updateCell = async (req, res) => {
+  const { pathId, topicId, submoduleId, cellIndex } = req.params;
+  const { content } = req.body;
+
+  try {
+    const path = await LearningPath.findOne({
+      _id: pathId,
+      user: req.user._id,
+    });
+
+    const topic = path?.topics.find((t) => t.id === topicId);
+    const sub = topic?.submodules.find((s) => s.id === submoduleId);
+
+    if (!sub || !sub.cells[cellIndex])
+      return res.status(404).json({ message: "Cell not found" });
+
+    sub.cells[cellIndex].content = content;
+
+    await path.save();
+
+    res.json(sub.cells[cellIndex]);
+  } catch (err) {
+    res.status(500).json({ message: "Failed to update cell" });
+  }
+};
+
+exports.deleteCell = async (req, res) => {
+  const { pathId, topicId, submoduleId, cellIndex } = req.params;
+
+  try {
+    const path = await LearningPath.findOne({
+      _id: pathId,
+      user: req.user._id,
+    });
+
+    const topic = path?.topics.find((t) => t.id === topicId);
+    const sub = topic?.submodules.find((s) => s.id === submoduleId);
+
+    if (!sub) return res.status(404).json({ message: "Submodule not found" });
+
+    sub.cells.splice(cellIndex, 1);
+
+    await path.save();
+
+    res.json({ message: "Cell deleted" });
+  } catch (err) {
+    res.status(500).json({ message: "Failed to delete cell" });
   }
 };
