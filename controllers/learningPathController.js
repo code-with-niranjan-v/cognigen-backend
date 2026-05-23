@@ -132,17 +132,25 @@ exports.generateLearningPath = async (req, res) => {
   }
 };
 
-// 2. Get all user's learning paths
+// 2. Get all user's learning paths - FIXED
 exports.getUserLearningPaths = async (req, res) => {
   try {
-    const paths = await LearningPath.find({ user: req.user._id })
+    const userId = req.user._id || req.user.id;
+
+    const paths = await LearningPath.find({ user: userId })
       .sort({ updatedAt: -1 })
       .select(
         "title courseName experienceLevel overallProgress status updatedAt topics",
-      );
+      )
+      .lean();
+
     return res.json(paths);
   } catch (error) {
-    return res.status(500).json({ message: "Failed to fetch learning paths" });
+    console.error("getUserLearningPaths ERROR:", error);
+    return res.status(500).json({
+      message: "Failed to fetch learning paths",
+      error: error.message,
+    });
   }
 };
 
@@ -333,6 +341,7 @@ exports.markSubmoduleComplete = async (req, res) => {
 
       if (path.overallProgress === 100) {
         path.status = "completed";
+        await recalculateProgress(path);
       }
 
       await path.save();
